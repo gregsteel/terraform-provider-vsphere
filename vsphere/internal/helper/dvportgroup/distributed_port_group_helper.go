@@ -3,6 +3,7 @@ package dvportgroup
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/provider"
 	"github.com/vmware/govmomi"
@@ -61,6 +62,7 @@ func FromPath(client *govmomi.Client, name string, dc *object.Datacenter) (*obje
 
 	ctx, cancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
 	defer cancel()
+
 	net, err := finder.Network(ctx, name)
 	if err != nil {
 		return nil, err
@@ -69,6 +71,35 @@ func FromPath(client *govmomi.Client, name string, dc *object.Datacenter) (*obje
 		return nil, fmt.Errorf("network at path %q is not a portgroup (type %s)", name, net.Reference().Type)
 	}
 	return FromMOID(client, net.Reference().Value)
+}
+
+// FromPartialName gets a portgroup object from its partial name.
+func FromPartialName(client *govmomi.Client, name string, dc *object.Datacenter) (*object.DistributedVirtualPortgroup, error) {
+	finder := find.NewFinder(client.Client, false)
+	if dc != nil {
+		finder.SetDatacenter(dc)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
+	defer cancel()
+	
+	netlist, err := finder.NetworkList(ctx, "*")
+	if err != nil {
+		return nil, err
+	}
+	
+	for _, net := range netlist {
+		if net.Reference().Type == "DistributedVirtualPortgroup" {
+			dpg := net.(*object.DistributedVirtualPortgroup)
+			var props mo.DistributedVirtualPortgroup
+			dpg.Properties(ctx, dpg.Reference(), nil, &props)
+			if strings.Contains(props.Config.Name, name) {
+				return FromMOID(client, net.Reference().Value)
+			}
+		}
+	}
+	
+	return nil, fmt.Errorf("network at path %q does not match any portgroup", name)
 }
 
 // Properties is a convenience method that wraps fetching the
