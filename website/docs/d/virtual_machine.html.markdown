@@ -25,7 +25,7 @@ data "vsphere_datacenter" "datacenter" {
 
 data "vsphere_virtual_machine" "template" {
   name          = "test-vm-template"
-  datacenter_id = "${data.vsphere_datacenter.dc.id}"
+  datacenter_id = "${data.vsphere_datacenter.datacenter.id}"
 }
 ```
 
@@ -68,6 +68,9 @@ The following attributes are exported:
   SAS), `pvscsi` (VMware Paravirtual), `buslogic` (BusLogic), or `mixed` when
   there are multiple controller types. Only the first number of controllers
   defined by `scsi_controller_scan_count` are scanned.
+* `scsi_bus_sharing` - Mode for sharing the SCSI bus. The modes are
+  physicalSharing, virtualSharing, and noSharing. Only the first number of
+  controllers defined by `scsi_controller_scan_count` are scanned.
 * `disks` - Information about each of the disks on this virtual machine or
   template. These are sorted by bus and unit number so that they can be applied
   to a `vsphere_virtual_machine` resource in the order the resource expects
@@ -82,6 +85,7 @@ The following attributes are exported:
 * `network_interface_types` - The network interface types for each network
   interface found on the virtual machine, in device bus order. Will be one of
   `e1000`, `e1000e`, `pcnet32`, `sriov`, `vmxnet2`, or `vmxnet3`.
+* `firmware` - The firmware type for this virtual machine. Can be `bios` or `efi`.
 
 ~> **NOTE:** Keep in mind when using the results of `scsi_type` and
 `network_interface_types`, that the `vsphere_virtual_machine` resource only

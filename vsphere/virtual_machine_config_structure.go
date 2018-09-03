@@ -42,6 +42,13 @@ var virtualMachineFirmwareAllowedValues = []string{
 	string(types.GuestOsDescriptorFirmwareTypeEfi),
 }
 
+var virtualMachineLatencySensitivityAllowedValues = []string{
+	string(types.LatencySensitivitySensitivityLevelLow),
+	string(types.LatencySensitivitySensitivityLevelNormal),
+	string(types.LatencySensitivitySensitivityLevelMedium),
+	string(types.LatencySensitivitySensitivityLevelHigh),
+}
+
 // getWithRestart fetches the resoruce data specified at key. If the value has
 // changed, a reboot is flagged in the virtual machine by setting
 // reboot_required to true.
@@ -154,6 +161,15 @@ func schemaVirtualMachineConfigSpec() map[string]*schema.Schema {
 			Description: "Enable the execution of pre-standby scripts when VMware tools is installed.",
 		},
 
+		// LatencySensitivity
+		"latency_sensitivity": {
+			Type:         schema.TypeString,
+			Optional:     true,
+			Default:      types.LatencySensitivitySensitivityLevelNormal,
+			Description:  "Controls the scheduling delay of the virtual machine. Use a higher sensitivity for applications that require lower latency, such as VOIP, media player applications, or applications that require frequent access to mouse or keyboard devices. Can be one of low, normal, medium, or high.",
+			ValidateFunc: validation.StringInSlice(virtualMachineLatencySensitivityAllowedValues, false),
+		},
+
 		// VirtualMachineConfigSpec
 		"name": {
 			Type:         schema.TypeString,
@@ -245,6 +261,12 @@ func schemaVirtualMachineConfigSpec() map[string]*schema.Schema {
 			Description: "vApp configuration data for this virtual machine. Can be used to provide configuration data for OVF images.",
 			MaxItems:    1,
 			Elem:        &schema.Resource{Schema: vAppSubresourceSchema()},
+		},
+		"vapp_transport": {
+			Type:        schema.TypeList,
+			Computed:    true,
+			Description: "vApp transport methods supported by virtual machine.",
+			Elem:        &schema.Schema{Type: schema.TypeString},
 		},
 		"change_version": {
 			Type:        schema.TypeString,
@@ -418,6 +440,21 @@ func expandVirtualMachineResourceAllocation(d *schema.ResourceData, key string) 
 	}
 	obj.Shares = shares
 	return obj
+}
+
+// expandLatencySensitivity reads certain ResourceData keys and returns a
+// LatencySensitivity.
+func expandLatencySensitivity(d *schema.ResourceData) *types.LatencySensitivity {
+	obj := &types.LatencySensitivity{
+		Level: types.LatencySensitivitySensitivityLevel(d.Get("latency_sensitivity").(string)),
+	}
+	return obj
+}
+
+// flattenLatencySensitivity reads various fields from a LatencySensitivity and
+// sets appropriate keys in the supplied ResourceData.
+func flattenLatencySensitivity(d *schema.ResourceData, obj *types.LatencySensitivity) error {
+	return d.Set("latency_sensitivity", obj.Level)
 }
 
 // flattenVirtualMachineResourceAllocation reads various fields from a
@@ -615,8 +652,12 @@ func expandVAppConfig(d *schema.ResourceData, client *govmomi.Client) (*types.Vm
 // and sets all keys in vapp.
 func flattenVAppConfig(d *schema.ResourceData, config types.BaseVmConfigInfo) error {
 	if config == nil {
+		d.Set("vapp_transport", []string{})
 		return nil
 	}
+	// Set `vapp_config here while config is available to avoid extra API calls
+	d.Set("vapp_transport", config.GetVmConfigInfo().OvfEnvironmentTransport)
+
 	props := config.GetVmConfigInfo().Property
 	if len(props) < 1 {
 		// No props to read is a no-op
@@ -628,11 +669,15 @@ func flattenVAppConfig(d *schema.ResourceData, config types.BaseVmConfigInfo) er
 			vac[v.Id] = v.Value
 		}
 	}
-	return d.Set("vapp", []interface{}{
-		map[string]interface{}{
-			"properties": vac,
-		},
-	})
+	// Only set if properties exist to prevent creating an unnecessary diff
+	if len(vac) > 0 {
+		return d.Set("vapp", []interface{}{
+			map[string]interface{}{
+				"properties": vac,
+			},
+		})
+	}
+	return nil
 }
 
 // expandCPUCountConfig is a helper for expandVirtualMachineConfigSpec that
@@ -725,6 +770,7 @@ func expandVirtualMachineConfigSpec(d *schema.ResourceData, client *govmomi.Clie
 		Firmware:            getWithRestart(d, "firmware").(string),
 		NestedHVEnabled:     getBoolWithRestart(d, "nested_hv_enabled"),
 		VPMCEnabled:         getBoolWithRestart(d, "cpu_performance_counters_enabled"),
+		LatencySensitivity:  expandLatencySensitivity(d),
 	}
 
 	return obj, nil
@@ -758,16 +804,19 @@ func flattenVirtualMachineConfigInfo(d *schema.ResourceData, obj *types.VirtualM
 	if err := flattenVirtualMachineFlagInfo(d, &obj.Flags); err != nil {
 		return err
 	}
-	if err := flattenVirtualMachineResourceAllocation(d, obj.CpuAllocation.(*types.ResourceAllocationInfo), "cpu"); err != nil {
+	if err := flattenVirtualMachineResourceAllocation(d, obj.CpuAllocation, "cpu"); err != nil {
 		return err
 	}
-	if err := flattenVirtualMachineResourceAllocation(d, obj.MemoryAllocation.(*types.ResourceAllocationInfo), "memory"); err != nil {
+	if err := flattenVirtualMachineResourceAllocation(d, obj.MemoryAllocation, "memory"); err != nil {
 		return err
 	}
 	if err := flattenExtraConfig(d, obj.ExtraConfig); err != nil {
 		return err
 	}
 	if err := flattenVAppConfig(d, obj.VAppConfig); err != nil {
+		return err
+	}
+	if err := flattenLatencySensitivity(d, obj.LatencySensitivity); err != nil {
 		return err
 	}
 

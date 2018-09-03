@@ -11,6 +11,7 @@ import (
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/folder"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/provider"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/structure"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/vappcontainer"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/viapi"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
@@ -48,6 +49,12 @@ func newUUIDNotFoundError(s string) *UUIDNotFoundError {
 	return &UUIDNotFoundError{
 		s: s,
 	}
+}
+
+// IsUUIDNotFoundError returns true if the error is a UUIDNotFoundError.
+func IsUUIDNotFoundError(err error) bool {
+	_, ok := err.(*UUIDNotFoundError)
+	return ok
 }
 
 // FromUUID locates a virtualMachine by its UUID.
@@ -127,10 +134,19 @@ func virtualMachineFromContainerView(ctx context.Context, client *govmomi.Client
 		}
 	}()
 
-	var vms []mo.VirtualMachine
-	err = v.RetrieveWithFilter(ctx, []string{"VirtualMachine"}, []string{"summary"}, &vms, property.Filter{"config.uuid": uuid})
+	var vms, results []mo.VirtualMachine
+	err = v.Retrieve(ctx, []string{"VirtualMachine"}, []string{"config.uuid"}, &results)
 	if err != nil {
 		return nil, err
+	}
+
+	for _, result := range results {
+		if result.Config == nil {
+			continue
+		}
+		if result.Config.Uuid == uuid {
+			vms = append(vms, result)
+		}
 	}
 
 	switch {
@@ -190,19 +206,24 @@ func Properties(vm *object.VirtualMachine) (*mo.VirtualMachine, error) {
 	return &props, nil
 }
 
-// WaitForGuestNet waits for a virtual machine to have routeable network
+// WaitForGuestNet waits for a virtual machine to have routable network
 // access. This is denoted as a gateway, and at least one IP address that can
 // reach that gateway. This function supports both IPv4 and IPv6, and returns
-// the moment either stack is routeable - it doesn't wait for both.
+// the moment either stack is routable - it doesn't wait for both.
 //
 // The timeout is specified in minutes. If zero or a negative value is passed,
 // the waiter returns without error immediately.
-func WaitForGuestNet(client *govmomi.Client, vm *object.VirtualMachine, timeout int) error {
+func WaitForGuestNet(client *govmomi.Client, vm *object.VirtualMachine, routable bool, timeout int) error {
 	if timeout < 1 {
 		log.Printf("[DEBUG] Skipping network waiter for VM %q", vm.InventoryPath)
 		return nil
 	}
-	log.Printf("[DEBUG] Waiting for routeable address on VM %q (timeout = %dm)", vm.InventoryPath, timeout)
+	log.Printf(
+		"[DEBUG] Waiting for an available IP address on VM %q (routable= %t, timeout = %dm)",
+		vm.InventoryPath,
+		routable,
+		timeout,
+	)
 	var v4gw, v6gw net.IP
 
 	p := client.PropertyCollector()
@@ -234,6 +255,15 @@ func WaitForGuestNet(client *govmomi.Client, vm *object.VirtualMachine, timeout 
 					if n.IpConfig != nil {
 						for _, addr := range n.IpConfig.IpAddress {
 							ip := net.ParseIP(addr.IpAddress)
+							if skipIPAddrForWaiter(ip) {
+								continue
+							}
+							if !routable {
+								// We are done. The rest of this block concerns itself with
+								// checking for a routable address, but the waiter has been
+								// flagged to not wait for one.
+								return true
+							}
 							var mask net.IPMask
 							if ip.To4() != nil {
 								mask = net.CIDRMask(int(addr.PrefixLength), 32)
@@ -253,15 +283,29 @@ func WaitForGuestNet(client *govmomi.Client, vm *object.VirtualMachine, timeout 
 	})
 
 	if err != nil {
-		// Provide a friendly error message if we timed out waiting for a routeable IP.
+		// Provide a friendly error message if we timed out waiting for a routable IP.
 		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("timeout waiting for a routeable interface")
+			return errors.New("timeout waiting for an available IP address")
 		}
 		return err
 	}
 
-	log.Printf("[DEBUG] Routeable address available for VM %q", vm.InventoryPath)
+	log.Printf("[DEBUG] IP address(es) is/are now available for VM %q", vm.InventoryPath)
 	return nil
+}
+
+func skipIPAddrForWaiter(ip net.IP) bool {
+	switch {
+	case ip.IsLinkLocalMulticast():
+		fallthrough
+	case ip.IsLinkLocalUnicast():
+		fallthrough
+	case ip.IsLoopback():
+		fallthrough
+	case ip.IsMulticast():
+		return true
+	}
+	return false
 }
 
 // Create wraps the creation of a virtual machine and the subsequent waiting of
@@ -270,7 +314,17 @@ func Create(c *govmomi.Client, f *object.Folder, s types.VirtualMachineConfigSpe
 	log.Printf("[DEBUG] Creating virtual machine %q", fmt.Sprintf("%s/%s", f.InventoryPath, s.Name))
 	ctx, cancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
 	defer cancel()
-	task, err := f.CreateVM(ctx, s, p, h)
+	var task *object.Task
+	// Check to see if the resource pool is a vApp
+	vc, err := vappcontainer.FromID(c, p.Reference().Value)
+	if err != nil {
+		if !viapi.IsManagedObjectNotFoundError(err) {
+			return nil, err
+		}
+		task, err = f.CreateVM(ctx, s, p, h)
+	} else {
+		task, err = vc.CreateChildVM(ctx, s, h)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -485,4 +539,124 @@ func Destroy(vm *object.VirtualMachine) error {
 	tctx, tcancel := context.WithTimeout(context.Background(), provider.DefaultAPITimeout)
 	defer tcancel()
 	return task.Wait(tctx)
+}
+
+// MOIDForUUIDResult is a struct that holds a virtual machine UUID -> MOID
+// association, designed to be used as a helper for mass returning the results
+// of translating multiple UUIDs to managed object IDs for various virtual
+// machine operations.
+type MOIDForUUIDResult struct {
+	// The UUID of a virtual machine.
+	UUID string
+
+	// The matching managed object reference ID for the virtual machine at the ID
+	// referenced by UUID.
+	MOID string
+}
+
+// MOIDForUUIDResults is a slice that holds multiple MOIDForUUIDResult structs.
+type MOIDForUUIDResults []MOIDForUUIDResult
+
+// MOIDForUUID returns the managed object reference ID for a specific virtual
+// machine UUID and returns a MOIDForUUIDResult with the appropriate
+// association.
+func MOIDForUUID(client *govmomi.Client, uuid string) (MOIDForUUIDResult, error) {
+	vm, err := FromUUID(client, uuid)
+	if err != nil {
+		return MOIDForUUIDResult{}, err
+	}
+	return MOIDForUUIDResult{
+		UUID: uuid,
+		MOID: vm.Reference().Value,
+	}, nil
+}
+
+// UUIDForMOID returns the managed object reference ID for a specific virtual
+// machine MOID and returns a MOIDForUUIDResult with the appropriate
+// association.
+func UUIDForMOID(client *govmomi.Client, moid string) (MOIDForUUIDResult, error) {
+	vm, err := FromMOID(client, moid)
+	if err != nil {
+		return MOIDForUUIDResult{}, err
+	}
+	props, err := Properties(vm)
+	if err != nil {
+		return MOIDForUUIDResult{}, err
+	}
+	return MOIDForUUIDResult{
+		UUID: props.Config.Uuid,
+		MOID: vm.Reference().Value,
+	}, nil
+}
+
+// MOIDsForUUIDs returns a MOIDForUUIDResults for a list of UUIDs. If one UUID
+// cannot be found, an error is returned. There are no partial results
+// returned.
+func MOIDsForUUIDs(client *govmomi.Client, uuids []string) (MOIDForUUIDResults, error) {
+	var results MOIDForUUIDResults
+	for _, uuid := range uuids {
+		result, err := MOIDForUUID(client, uuid)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+// UUIDsForMOIDs returns a MOIDForUUIDResults for a list of MOIDs. If one MOID
+// cannot be found, an error is returned. There are no partial results
+// returned.
+func UUIDsForMOIDs(client *govmomi.Client, moids []string) (MOIDForUUIDResults, error) {
+	var results MOIDForUUIDResults
+	for _, uuid := range moids {
+		result, err := UUIDForMOID(client, uuid)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+// UUIDsForManagedObjectReferences returns a MOIDForUUIDResults for a list of
+// ManagedObjectReferences. If one cannot be found, an error is returned. There
+// are no partial results returned.
+func UUIDsForManagedObjectReferences(client *govmomi.Client, refs []types.ManagedObjectReference) (MOIDForUUIDResults, error) {
+	var moids []string
+	for _, ref := range refs {
+		moids = append(moids, ref.Value)
+	}
+	return UUIDsForMOIDs(client, moids)
+}
+
+// MOIDs returns all MOIDs in a MOIDForUUIDResults.
+func (r MOIDForUUIDResults) MOIDs() []string {
+	var moids []string
+	for _, result := range r {
+		moids = append(moids, result.MOID)
+	}
+	return moids
+}
+
+// ManagedObjectReferences returns all MOIDs in a MOIDForUUIDResults, as
+// ManagedObjectReferences as type VirtualMachine.
+func (r MOIDForUUIDResults) ManagedObjectReferences() []types.ManagedObjectReference {
+	var refs []types.ManagedObjectReference
+	for _, result := range r {
+		refs = append(refs, types.ManagedObjectReference{
+			Type:  "VirtualMachine",
+			Value: result.MOID,
+		})
+	}
+	return refs
+}
+
+// UUIDs returns all UUIDs in a MOIDForUUIDResults.
+func (r MOIDForUUIDResults) UUIDs() []string {
+	var uuids []string
+	for _, result := range r {
+		uuids = append(uuids, result.UUID)
+	}
+	return uuids
 }

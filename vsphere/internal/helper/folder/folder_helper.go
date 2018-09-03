@@ -191,9 +191,15 @@ func folderFromObject(client *govmomi.Client, obj interface{}, folderType RootPa
 		p, err = RootPathParticleNetwork.PathFromNewRoot(o.InventoryPath, folderType, relative)
 	case *object.Datastore:
 		p, err = RootPathParticleDatastore.PathFromNewRoot(o.InventoryPath, folderType, relative)
+	case *object.StoragePod:
+		p, err = RootPathParticleDatastore.PathFromNewRoot(o.InventoryPath, folderType, relative)
 	case *object.HostSystem:
 		p, err = RootPathParticleHost.PathFromNewRoot(o.InventoryPath, folderType, relative)
 	case *object.ResourcePool:
+		p, err = RootPathParticleHost.PathFromNewRoot(o.InventoryPath, folderType, relative)
+	case *object.ComputeResource:
+		p, err = RootPathParticleHost.PathFromNewRoot(o.InventoryPath, folderType, relative)
+	case *object.ClusterComputeResource:
 		p, err = RootPathParticleHost.PathFromNewRoot(o.InventoryPath, folderType, relative)
 	case *object.VirtualMachine:
 		p, err = RootPathParticleVM.PathFromNewRoot(o.InventoryPath, folderType, relative)
@@ -216,6 +222,18 @@ func DatastoreFolderFromObject(client *govmomi.Client, obj interface{}, relative
 	}
 
 	return validateDatastoreFolder(folder)
+}
+
+// HostFolderFromObject returns an *object.Folder from a given object, and
+// relative host folder path. If no such folder is found, or if it is not a
+// host folder, an appropriate error will be returned.
+func HostFolderFromObject(client *govmomi.Client, obj interface{}, relative string) (*object.Folder, error) {
+	folder, err := folderFromObject(client, obj, RootPathParticleHost, relative)
+	if err != nil {
+		return nil, err
+	}
+
+	return validateHostFolder(folder)
 }
 
 // VirtualMachineFolderFromObject returns an *object.Folder from a given
@@ -252,6 +270,19 @@ func validateDatastoreFolder(folder *object.Folder) (*object.Folder, error) {
 	}
 	if ft != VSphereFolderTypeDatastore {
 		return nil, fmt.Errorf("%q is not a datastore folder", folder.InventoryPath)
+	}
+	return folder, nil
+}
+
+// validateHostFolder checks to make sure the folder is a host
+// folder, and returns it if it is, or an error if it isn't.
+func validateHostFolder(folder *object.Folder) (*object.Folder, error) {
+	ft, err := FindType(folder)
+	if err != nil {
+		return nil, err
+	}
+	if ft != VSphereFolderTypeHost {
+		return nil, fmt.Errorf("%q is not a host folder", folder.InventoryPath)
 	}
 	return folder, nil
 }
@@ -376,21 +407,18 @@ func FindType(folder *object.Folder) (VSphereFolderType, error) {
 		return ft, err
 	}
 
-	ct := props.ChildType
-
-	// Supporting a special case here - ESXi's childtype for its root folder for
-	// creating virtual machines is always VirtualMachine first. If that's what
-	// we have, just return here with the folder, as the folder is necessary to
-	// call CreateVM_Task on.
-	if ct[0] == "VirtualMachine" {
-		return VSphereFolderTypeVM, nil
+	// Depending on the container type, the actual folder type may be contained
+	// in either the first or second element, the former for clusters, datastore
+	// clusters, or standalone ESXi for VMs, and the latter in the case of actual
+	// folders that can contain subfolders.
+	var ct string
+	if props.ChildType[0] != "Folder" {
+		ct = props.ChildType[0]
+	} else {
+		ct = props.ChildType[1]
 	}
 
-	if ct[0] != "Folder" {
-		return ft, fmt.Errorf("expected first childtype node to be Folder, got %s", ct[0])
-	}
-
-	switch ct[1] {
+	switch ct {
 	case "Datacenter":
 		ft = VSphereFolderTypeDatacenter
 	case "ComputeResource":
@@ -402,7 +430,7 @@ func FindType(folder *object.Folder) (VSphereFolderType, error) {
 	case "Network":
 		ft = VSphereFolderTypeNetwork
 	default:
-		return ft, fmt.Errorf("unknown folder type: %#v", ct[1])
+		return ft, fmt.Errorf("unknown folder type: %#v", ct)
 	}
 
 	return ft, nil

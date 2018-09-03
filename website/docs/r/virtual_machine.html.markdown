@@ -36,7 +36,7 @@ VMDK-backed virtual disks - it does not support other special kinds of disk
 devices like RDM disks.
 
 Disks are managed by an arbitrary label supplied to the [`label`](#label)
-attribute of a [`disk` sub-resource](#disk-options). This is separate from the
+attribute of a [`disk` block](#disk-options). This is separate from the
 automatic naming that vSphere picks for you when creating a virtual machine.
 Control over a virtual disk's name is not supported unless you are attaching an
 external disk with the [`attach`](#attach) attribute.
@@ -75,14 +75,14 @@ Two waiters of note are:
   the timeout or turn it off. This can be controlled by the
   [`timeout`](#timeout-1) setting in the [customization
   settings](#virtual-machine-customization) block.
-* **The network waiter:** This waiter waits for a _routeable_ interface to show
-  up on a guest virtual machine close to the end of both VM creation and
-  update. This waiter is necessary to ensure that correct IP information gets
-  reported to the guest virtual machine, mainly to facilitate the availability
-  of a valid, routeable default IP address for any
-  [provisioners][tf-docs-provisioners]. This option can be managed or turned
-  off via the [`wait_for_guest_net_timeout`](#wait_for_guest_net_timeout)
-  top-level setting.
+* **The network waiter:** This waiter waits for interfaces to show up on a
+  guest virtual machine close to the end of both VM creation and update. This
+  waiter is necessary to ensure that correct IP information gets reported to
+  the guest virtual machine, mainly to facilitate the availability of a valid,
+  reachable default IP address for any [provisioners][tf-docs-provisioners].
+  The behavior of the waiter can be controlled with the
+  [`wait_for_guest_net_timeout`](#wait_for_guest_net_timeout) and
+  [`wait_for_guest_net_routable`](#wait_for_guest_net_routable) settings.
 
 [tf-docs-provisioners]: /docs/provisioners/index.html
 
@@ -96,10 +96,11 @@ to the [import](#importing) path, with the exception that the `terraform
 import` command does not need to be run. See that section for details on what
 is required before you run `terraform plan` on a state that requires migration.
 
-A successful import usually only results in a diff where configured disks
-transition their [`keep_on_remove`](#keep_on_remove) settings from `true` to
-`false`. This operation does not perform any virtual machine operations and is
-safe to run while the virtual machine is running.
+A successful migration usually only results in a configuration-only diff - that
+is, Terraform reconciles some configuration settings that cannot be set during
+the migration process with state. In this event, no reconfiguration operations
+are sent to the vSphere server during the next `terraform apply`.  See the
+[importing](#importing) section for more details.
 
 ## Example Usage
 
@@ -130,8 +131,8 @@ data "vsphere_datastore" "datastore" {
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
-data "vsphere_resource_pool" "pool" {
-  name          = "cluster1/Resources"
+data "vsphere_compute_cluster" "cluster" {
+  name          = "cluster1"
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
@@ -142,7 +143,7 @@ data "vsphere_network" "network" {
 
 resource "vsphere_virtual_machine" "vm" {
   name             = "terraform-test"
-  resource_pool_id = "${data.vsphere_resource_pool.pool.id}"
+  resource_pool_id = "${data.vsphere_compute_cluster.cluster.resource_pool_id}"
   datastore_id     = "${data.vsphere_datastore.datastore.id}"
 
   num_cpus = 2
@@ -171,6 +172,9 @@ Windows machines), and disk attributes.
 
 [tf-vsphere-virtual-machine-ds]: /docs/providers/vsphere/d/virtual_machine.html
 
+~> **NOTE:** Cloning requires vCenter and is not supported on direct ESXi
+connections.
+
 ```hcl
 data "vsphere_datacenter" "dc" {
   name = "dc1"
@@ -181,8 +185,8 @@ data "vsphere_datastore" "datastore" {
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
-data "vsphere_resource_pool" "pool" {
-  name          = "cluster1/Resources"
+data "vsphere_compute_cluster" "cluster" {
+  name          = "cluster1"
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
@@ -198,7 +202,7 @@ data "vsphere_virtual_machine" "template" {
 
 resource "vsphere_virtual_machine" "vm" {
   name             = "terraform-test"
-  resource_pool_id = "${data.vsphere_resource_pool.pool.id}"
+  resource_pool_id = "${data.vsphere_compute_cluster.cluster.resource_pool_id}"
   datastore_id     = "${data.vsphere_datastore.datastore.id}"
 
   num_cpus = 2
@@ -270,8 +274,8 @@ data "vsphere_datastore" "datastore" {
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
-data "vsphere_resource_pool" "pool" {
-  name          = "cluster1/Resources"
+data "vsphere_compute_cluster" "cluster" {
+  name          = "cluster1"
   datacenter_id = "${data.vsphere_datacenter.dc.id}"
 }
 
@@ -287,7 +291,7 @@ data "vsphere_virtual_machine" "tempate_from_ovf" {
 
 resource "vsphere_virtual_machine" "vm" {
   name             = "terraform-test"
-  resource_pool_id = "${data.vsphere_resource_pool.pool.id}"
+  resource_pool_id = "${data.vsphere_compute_cluster.cluster.resource_pool_id}"
   datastore_id     = "${data.vsphere_datastore.datastore.id}"
 
   num_cpus = 2
@@ -325,6 +329,73 @@ resource "vsphere_virtual_machine" "vm" {
 }
 ```
 
+### Using Storage DRS
+
+The `vsphere_virtual_machine` resource also supports Storage DRS, allowing the
+assignment of virtual machines to datastore clusters. When assigned to a
+datastore cluster, changes to a virtual machine's underlying datastores are
+ignored unless disks drift outside of the datastore cluster. The example below
+makes use of the [`vsphere_datastore_cluster` data
+source][tf-vsphere-datastore-cluster-data-source], and the
+[`datastore_cluster_id`](#datastore_cluster_id) configuration setting. Note
+that the [`vsphere_datastore_cluster`
+resource][tf-vsphere-datastore-cluster-resource] also exists to allow for
+management of datastore clusters directly in Terraform.
+
+[tf-vsphere-datastore-cluster-data-source]: /docs/providers/vsphere/d/datastore_cluster.html
+[tf-vsphere-datastore-cluster-resource]: /docs/providers/vsphere/r/datastore_cluster.html
+
+~> **NOTE:** When managing datastore clusters, member datastores, and virtual
+machines within the same Terraform configuration, race conditions can apply.
+This is because datastore clusters must be created before datastores can be
+assigned to them, and the respective `vsphere_virtual_machine` resources will
+no longer have an implicit dependency on the specific datastore resources. Use
+[`depends_on`][tf-docs-depends-on] to create an explicit dependency on the
+datastores in the cluster, or manage datastore clusters and datastores in a
+separate configuration.
+
+[tf-docs-depends-on]: /docs/configuration/resources.html#depends_on
+
+```hcl
+data "vsphere_datacenter" "dc" {
+  name = "dc1"
+}
+
+data "vsphere_datastore_cluster" "datastore_cluster" {
+  name          = "datastore-cluster1"
+  datacenter_id = "${data.vsphere_datacenter.dc.id}"
+}
+
+data "vsphere_compute_cluster" "cluster" {
+  name          = "cluster1"
+  datacenter_id = "${data.vsphere_datacenter.dc.id}"
+}
+
+data "vsphere_network" "network" {
+  name          = "public"
+  datacenter_id = "${data.vsphere_datacenter.dc.id}"
+}
+
+resource "vsphere_virtual_machine" "vm" {
+  name                 = "terraform-test"
+  resource_pool_id     = "${data.vsphere_compute_cluster.cluster.resource_pool_id}"
+  datastore_cluster_id = "${data.vsphere_datastore_cluster.datastore_cluster.id}"
+
+  num_cpus = 2
+  memory   = 1024
+  guest_id = "other3xLinux64Guest"
+
+  network_interface {
+    network_id = "${data.vsphere_network.network.id}"
+  }
+
+  disk {
+    label = "disk0"
+    size  = 20
+  }
+}
+```
+
 ## Argument Reference
 
 The following arguments are supported:
@@ -344,19 +415,34 @@ options:
 
 ~> **NOTE:** All clusters and standalone hosts have a resource pool, even if
 one has not been explicitly created. For more information, see the section on
-[specifying the root resource pool for a cluster or standalone
-host][docs-resource-pool-cluster-default] in the `vsphere_resource_pool` data
-source documentation. This resource does not take a cluster or standalone host
-resource directly.
+[specifying the root resource pool ][docs-resource-pool-cluster-default] in the
+`vsphere_resource_pool` data source documentation. This resource does not take
+a cluster or standalone host resource directly.
 
-[docs-resource-pool-cluster-default]: /docs/providers/vsphere/d/resource_pool.html#specifying-the-default-resource-pool-for-a-cluster
+[docs-resource-pool-cluster-default]: /docs/providers/vsphere/d/resource_pool.html#specifying-the-root-resource-pool-for-a-standalone-host
 
-* `datastore_id` - (Required) The [managed object reference
+* `datastore_id` - (Optional) The [managed object reference
   ID][docs-about-morefs] of the virtual machine's datastore. The virtual
   machine configuration is placed here, along with any virtual disks that are
   created where a datastore is not explicitly specified. See the section on
   [virtual machine migration](#virtual-machine-migration) for details on
   changing this value.
+* `datastore_cluster_id` - (Optional) The [managed object reference
+  ID][docs-about-morefs] of the datastore cluster ID to use. This setting
+  applies to entire virtual machine and implies that you wish to use Storage
+  DRS with this virtual machine. See the section on [virtual machine
+  migration](#virtual-machine-migration) for details on changing this value.
+
+~> **NOTE:** One of `datastore_id` or `datastore_cluster_id` must be specified.
+
+~> **NOTE:** Use of `datastore_cluster_id` requires Storage DRS to be enabled
+on that cluster. 
+
+~> **NOTE:** The `datastore_cluster_id` setting applies to the entire virtual
+machine - you cannot assign individual datastore clusters to individual disks.
+In addition to this, you cannot use the [`attach`](#attach) setting to attach
+external disks on virtual machines that are assigned to datastore clusters.
+
 * `folder` - (Optional) The path to the folder to put this virtual machine in,
   relative to the datacenter that the resource pool is in.
 * `host_system_id` - (Optional) An optional [managed object reference
@@ -376,6 +462,10 @@ resource directly.
   specified template. Optional customization options can be submitted as well.
   See [creating a virtual machine from a
   template](#creating-a-virtual-machine-from-a-template) for more details.
+
+~> **NOTE:** Cloning requires vCenter and is not supported on direct ESXi
+connections.
+
 * `vapp` - (Optional) Optional vApp configuration. The only sub-key available
   is `properties`, which is a key/value map of properties for virtual machines
   imported from OVF or OVA files. See [Using vApp properties to supply OVF/OVA
@@ -398,13 +488,15 @@ resource directly.
 
 ~> **NOTE:** Do not use `extra_config` when working with a template imported
 from OVF or OVA as more than likely your settings will be ignored. Use the
-`vapp` sub-resource's `properties` section as outlined in [Using vApp
-properties to supply OVF/OVA
+`vapp` block's `properties` section as outlined in [Using vApp properties to
+supply OVF/OVA
 configuration](#using-vapp-properties-to-supply-ovf-ova-configuration).
 
 * `scsi_type` - (Optional) The type of SCSI bus this virtual machine will have.
   Can be one of lsilogic (LSI Logic Parallel), lsilogic-sas (LSI Logic SAS) or
   pvscsi (VMware Paravirtual). Defualt: `pvscsi`.
+* `scsi_bus_sharing` - (Optional) Mode for sharing the SCSI bus. The modes are
+  physicalSharing, virtualSharing, and noSharing. Default: `noSharing`.
 * `tags` - (Optional) The IDs of any tags to attach to this resource. See
   [here][docs-applying-tags] for a reference on how to apply tags.
 
@@ -536,9 +628,25 @@ behavior.
 * `swap_placement_policy` - (Optional) The swap file placement policy for this
   virtual machine. Can be one of `inherit`, `hostLocal`, or `vmDirectory`.
   Default: `inherit`.
+* `latency_sensitivity` - (Optional) Controls the scheduling delay of the
+  virtual machine. Use a higher sensitivity for applications that require lower
+  latency, such as VOIP, media player applications, or applications that
+  require frequent access to mouse or keyboard devices. Can be one of `low`,
+  `normal`, `medium`, or `high`.
+
+~> **NOTE:** Do not use a `latency_sensitivity` setting of `low` or `medium` on
+hosts running ESXi 6.0 or older. Doing so may result in virtual machine startup
+issues or spurious diffs in Terraform. In addition, on higher sensitivities,
+you may have to adjust [`memory_reservation`](#memory_reservation) to the full
+amount of memory provisioned for the virtual machine.
+
 * `wait_for_guest_net_timeout` - (Optional) The amount of time, in minutes, to
-  wait for a routeable IP address on this virtual machine. A value less than 1
-  disables the waiter. Defualt: 5 minutes.
+  wait for an available IP address on this virtual machine. A value less than 1
+  disables the waiter. Default: 5 minutes.
+* `wait_for_guest_net_routable` - (Optional) Controls whether or not the guest
+  network waiter waits for a routable address. When `false`, the waiter does
+  not wait for a default gateway, nor are IP addresses checked against any
+  discovered default gateways as part of its success criteria. Default: `true`.
 * `shutdown_wait_timeout` - (Optional) The amount of time, in minutes, to wait
   for a graceful guest shutdown when making necessary updates to the virtual
   machine. If `force_power_off` is set to true, the VM will be force powered-off
@@ -563,7 +671,7 @@ this value to add out-of-band devices.
 
 ### Disk options
 
-Virtual disks are managed by adding an instance of the `disk` sub-resource.
+Virtual disks are managed by adding an instance of the `disk` block.
 
 At the very least, there must be `name` and `size` attributes. `unit_number` is
 required for any disk other than the first, and there must be at least one
@@ -628,14 +736,22 @@ externally with `attach` when the `path` field is not specified.
   to use the datastore of the virtual machine. See the section on [virtual
   machine migration](#virtual-machine-migration) for details on changing this
   value.
+
+~> **NOTE:** Datastores cannot be assigned to individual disks when
+[`datastore_cluster_id`](#datastore_cluster_id) is in use.
+
 * `attach` - (Optional) Attach an external disk instead of creating a new one.
   Implies and conflicts with `keep_on_remove`. If set, you cannot set `size`,
   `eagerly_scrub`, or `thin_provisioned`. Must set `path` if used.
+
+~> **NOTE:** External disks cannot be attached when
+[`datastore_cluster_id`](#datastore_cluster_id) is in use.
+
 * `path` - (Optional) When using `attach`, this parameter controls the path of
   a virtual disk to attach externally. Otherwise, it is a computed attribute
   that contains the virtual disk's current filename.
-* `keep_on_remove` - (Optional) Keep this disk when removing the sub-resource
-  or destroying the virtual machine. Default: `false`.
+* `keep_on_remove` - (Optional) Keep this disk when removing the device or
+  destroying the virtual machine. Default: `false`.
 * `disk_mode` - (Optional) The mode of this this virtual disk for purposes of
   writes and snapshotting. Can be one of `append`, `independent_nonpersistent`,
   `independent_persistent`, `nonpersistent`, `persistent`, or `undoable`.
@@ -646,11 +762,12 @@ externally with `attach` when the `path` field is not specified.
 
 * `eagerly_scrub` - (Optional) If set to `true`, the disk space is zeroed out
   on VM creation. This will delay the creation of the disk or virtual machine.
-  See the section on [picking a disk type](#picking-a-disk-type).  Default:
-  `false`.
-* `thin_provisioned` - (Optional) If `true`, this disk is thin provisioned, with
-  space for the file being allocated on an as-needed basis. See the section on
-  [picking a disk type](#picking-a-disk-type). Default: `true`. 
+  Cannot be set to `true` when `thin_provisioned` is `true`.  See the section
+  on [picking a disk type](#picking-a-disk-type).  Default: `false`.
+* `thin_provisioned` - (Optional) If `true`, this disk is thin provisioned,
+  with space for the file being allocated on an as-needed basis. Cannot be set
+  to `true` when `eagerly_scrub` is `true`. See the section on [picking a disk
+  type](#picking-a-disk-type). Default: `true`. 
 * `disk_sharing` - (Optional) The sharing mode of this virtual disk. Can be one
   of `sharingMultiWriter` or `sharingNone`. Default: `sharingNone`.
 
@@ -678,7 +795,7 @@ externally with `attach` when the `path` field is not specified.
 The `eagerly_scrub` and `thin_provisioned` options control the space allocation
 type of a virtual disk. These show up in the vSphere console as a unified
 enumeration of options, the equivalents of which are explained below. The
-defaults in the sub-resource are the equivalent of thin provisioning.
+defaults in Terraform are the equivalent of thin provisioning.
 
 * **Thick provisioned lazy zeroed:** Both `eagerly_scrub` and
   `thin_provisioned` should be set to `false`.
@@ -703,7 +820,7 @@ until the settings are corrected.
 ### Network interface options
 
 Network interfaces are managed by adding an instance of the `network_interface`
-sub-resource.
+block.
 
 Interfaces are assigned to devices in the specific order they are declared.
 This has different implications for different operating systems.
@@ -754,7 +871,8 @@ The options are:
 ### CDROM options
 
 A single virtual CDROM device can be created and attached to the virtual
-machine. The resource only supports attaching a CDROM from a datastore ISO.
+machine. The resource supports attaching a CDROM from a datastore ISO or
+using a remote client device.
 
 An example is below:
 
@@ -771,13 +889,25 @@ resource "vsphere_virtual_machine" "vm" {
 
 The options are:
 
-* `datastore_id` - (Required) The datastore ID that the ISO is located in.
-* `path` - (Required) The path to the ISO file.
+* `client_device` - (Optional) Indicates whether the device should be backed by
+  remote client device. Conflicts with `datastore_id` and `path`.
+* `datastore_id` - (Optional) The datastore ID that the ISO is located in.
+  Requried for using a datastore ISO. Conflicts with `client_device`.
+* `path` - (Optional) The path to the ISO file. Requried for using a datastore
+  ISO. Conflicts with `client_device`.
+
+~> **NOTE:** Either `client_device` (for a remote backed CDROM) or `datastore_id`
+and path (for a datastore ISO backed CDROM) are required.
+
+~> **NOTE:** Some CDROM drive types are currently unsupported by this resource,
+such as pass-through devices. If these drives are present in a cloned template,
+or added outside of Terraform, they will have their configurations corrected to
+that of the defined device, or removed if no `cdrom` block is present.
 
 ### Virtual device computed options
 
-Virtual device resources (`disk`, `network_interface`, and `cdrom`) all export
-the following attributes. These options help locate the sub-resource on future
+Configured virtual devices (`disk`, `network_interface`, and `cdrom`) all
+export the following attributes. These options help locate the device on future
 Terraform runs. The options are:
 
 * `key` - The ID of the device within the virtual machine.
@@ -788,18 +918,21 @@ Terraform runs. The options are:
 
 ## Creating a Virtual Machine from a Template
 
-The `clone` sub-resource can be used to create a new virtual machine from an
-existing virtual machine or template. The resource supports both making a
-complete copy of a virtual machine, or cloning from a snapshot (otherwise known
-as a linked clone).
+The `clone` block can be used to create a new virtual machine from an existing
+virtual machine or template. The resource supports both making a complete copy
+of a virtual machine, or cloning from a snapshot (otherwise known as a linked
+clone).
 
-For see the [cloning and customization
+See the [cloning and customization
 example](#cloning-and-customization-example) for a usage synopsis.
 
 ~> **NOTE:** Changing any option in `clone` after creation forces a new
 resource.
 
-The options available in the `clone` sub-resource are:
+~> **NOTE:** Cloning requires vCenter and is not supported on direct ESXi
+connections.
+
+The options available in the `clone` block are:
 
 * `template_uuid` - (Required) The UUID of the source virtual machine or
   template.
@@ -821,8 +954,8 @@ settings.
 [vmware-docs-customize]: https://docs.vmware.com/en/VMware-vSphere/6.5/com.vmware.vsphere.vm_admin.doc/GUID-58E346FF-83AE-42B8-BE58-253641D257BC.html
 
 To perform virtual machine customization as a part of the clone process,
-specify the `customize` sub-resource within the `clone` sub-resource with the
-respective customization options.  See the [cloning and customization
+specify the `customize` block with the respective customization options, nested
+within the `clone` block. See the [cloning and customization
 example](#cloning-and-customization-example) for a usage synopsis.
 
 The settings for `customize` are as follows:
@@ -835,10 +968,11 @@ The settings for `customize` are as follows:
 
 #### Network interface settings
 
-The following settings should be in a `network_interface` block in the
-`customize` sub-resource. These settings configure network interfaces on a
-per-interface basis and are matched up to `network_interface` sub-resources in
-the main block in the order they are declared.
+These settings, which should be specified in nested `network_interface` blocks
+within [`customize`](#virtual-machine-customization), configure network
+interfaces on a per-interface basis and are matched up to
+[`network_interface`](#network-interface-options) devices in the order they are
+declared.
 
 Given the following example:
 
@@ -965,7 +1099,7 @@ settings](#network-interface-settings).
 
 #### Linux customization options
 
-The settings in the `linux_options` sub-resource pertain to Linux guest OS
+The settings in the `linux_options` block pertain to Linux guest OS
 customization. If you are customizing a Linux operating system, this section
 must be included.
 
@@ -1005,7 +1139,7 @@ The options are:
 
 #### Windows customization options
 
-The settings in the `windows_options` sub-resource pertain to Windows guest OS
+The settings in the `windows_options` block pertain to Windows guest OS
 customization. If you are customizing a Windows operating system, this section
 must be included.
 
@@ -1106,9 +1240,11 @@ included if the other is specified.
 ### Using vApp properties to supply OVF/OVA configuration
 
 Alternative to the settings in `customize`, one can use the settings in the
-`properties` section of the `vapp` sub-resource to supply configuration
-parameters to a virtual machine cloned from a template that came from an
-imported OVF or OVA file.
+`properties` section of the `vapp` block to supply configuration parameters to
+a virtual machine cloned from a template that came from an imported OVF or OVA
+file. Both GuestInfo and ISO transport methods are supported. For templates
+that use ISO transport, a CDROM backed by client device is required. See [CDROM
+options](#cdrom-options) for details. 
 
 ~> **NOTE:** The only supported usage path for vApp properties is for existing
 user-configurable keys. These generally come from an existing template that was
@@ -1144,11 +1280,11 @@ resource "vsphere_virtual_machine" "vm" {
 Note that when cloning from a template, there are additional requirements in
 both the resource configuration and source template:
 
+* The virtual machine must not be powered on at the time of cloning.
 * All disks on the virtual machine must be SCSI disks.
-* You must specify at least the same number of `disk` sub-resources as there
-  are disks that exist in the template. These sub-resources are ordered and
-  lined up by the `unit_number` attribute. Additional disks can be added past
-  this.
+* You must specify at least the same number of `disk` devices as there are
+  disks that exist in the template. These devices are ordered and lined up by
+  the `unit_number` attribute. Additional disks can be added past this.
 * The `size` of a virtual disk must be at least the same size as its
   counterpart disk in the template.
 * When using `linked_clone`, the `size`, `thin_provisioned`, and
@@ -1201,8 +1337,14 @@ Storage migration can be done on two levels:
 * Global datastore migration can be handled by changing the global
   `datastore_id` attribute. This triggers a storage migration for all disks
   that do not have an explicit `datastore_id` specified.
-* An individual `disk` sub-resource can be migrated by manually specifying the
-  `datastore_id` in its sub-resource. This also pins it to the specific
+* When using Storage DRS through the `datastore_cluster_id` attribute, the
+  entire virtual machine can be migrated from one datastore cluster to another
+  by changing the value of this setting. In addition, when
+  `datastore_cluster_id` is in use, any disks that drift to datastores outside
+  of the datastore cluster via such actions as manual modification will be
+  migrated back to the datastore cluster on the next apply.
+* An individual `disk` device can be migrated by manually specifying the
+  `datastore_id` in its configuration block. This also pins it to the specific
   datastore that is specified - if at a later time the VM and any unpinned
   disks migrate to another host, the disk will stay on the specified datastore.
 
@@ -1256,9 +1398,9 @@ The following attributes are exported on the base level of this resource:
 * `vmx_path` - The path of the virtual machine's configuration file in the VM's
   datastore.
 * `imported` - This is flagged if the virtual machine has been imported, or the
-  state has been migrated from a previous version of the resource, and blocks
-  the `clone` configuration option from being set. See the section on
-  [importing](#importing) below.
+  state has been migrated from a previous version of the resource. It
+  influences the behavior of the first post-import apply operation. See the
+  section on [importing](#importing) below.
 * `change_version` - A unique identifier for a given version of the last
   configuration applied, such the timestamp of the last update to the
   configuration.
@@ -1274,6 +1416,13 @@ The following attributes are exported on the base level of this resource:
 * `guest_ip_addresses` - The current list of IP addresses on this machine,
   including the value of `default_ip_address`. If VMware tools is not running
   on the virtual machine, or if the VM is powered off, this list will be empty.
+* `moid`: The [managed object reference ID][docs-about-morefs] of the created
+  virtual machine.
+* `vapp_transport` - Computed value which is only valid for cloned virtual
+  machines. A list of vApp transport methods supported by the source virtual
+  machine or template.
+
+[docs-about-morefs]: /docs/providers/vsphere/index.html#use-of-managed-object-references-by-the-vsphere-provider
 
 ## Importing 
 
@@ -1309,10 +1458,6 @@ In addition to these rules, the following extra rules apply to importing:
   until the first `terraform apply` runs, which will remove the setting for
   known disks. This is an extra safeguard against naming or accounting mistakes
   in the disk configuration.
-* You cannot use the [`clone`](#clone) sub-resource on any imported VM. If you
-  need to clone a new virtual machine or want a working configuration with
-  `clone` features, you will need to create a new resource and destroy the old
-  one.
 * The [`scsi_controller_count`](#scsi_controller_count) for the resource is set
   to the number of contiguous SCSI controllers found, starting with the SCSI
   controller at bus number 0. If no SCSI controllers are found, the VM is not
@@ -1322,9 +1467,25 @@ In addition to these rules, the following extra rules apply to importing:
 
 After importing, you should run `terraform plan`. Unless you have changed
 anything else in configuration that would be causing other attributes to
-change, the only difference should be the transition of
-[`keep_on_remove`](#keep_on_remove) of known disks from `true` to `false`. The
-operation only updates Terraform state when applied, and is safe to run when
-the virtual machine is running. If more settings are being modified, you may
-need to plan maintenance accordingly for any necessary re-configuration of the
-virtual machine.
+change, the only difference should be configuration-only changes, usually
+comprising of:
+
+* The [`imported`](#imported) flag will transition from `true` to `false`.
+* [`keep_on_remove`](#keep_on_remove) of known disks will transition from
+  `true` to `false`. 
+* Configuration supplied in the [`clone`](#clone) block, if present, will be
+  persisted to state. This initial persistence operation does not perform any
+  cloning or customization actions, nor does it force a new resource. After the
+  first apply operation, further changes to `clone` will force a new resource
+  as per normal operation.
+
+~> **NOTE:** Further to the above, do not make any configuration changes to
+`clone` after importing or upgrading from a legacy version of the provider
+before doing an initial `terraform apply` as these changes will not correctly
+force a new resource, and your changes will have persisted to state, preventing
+further plans from correctly triggering a diff.
+
+These changes only update Terraform state when applied, hence it is safe to run
+when the virtual machine is running. If more settings are being modified, you
+may need to plan maintenance accordingly for any necessary re-configuration of
+the virtual machine.

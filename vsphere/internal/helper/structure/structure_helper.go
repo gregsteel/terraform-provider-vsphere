@@ -4,10 +4,27 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/vmware/govmomi/vim25/types"
 )
+
+// ResourceIDStringer is a small interface that can be used to supply
+// ResourceData and ResourceDiff to functions that need to print the ID of a
+// resource, namely used by logging.
+type ResourceIDStringer interface {
+	Id() string
+}
+
+// ResourceIDString prints a friendly string for a resource, supplied by name.
+func ResourceIDString(d ResourceIDStringer, name string) string {
+	id := d.Id()
+	if id == "" {
+		id = "<new resource>"
+	}
+	return fmt.Sprintf("%s (ID = %s)", name, id)
+}
 
 // SliceInterfacesToStrings converts an interface slice to a string slice. The
 // function does not attempt to do any sanity checking and will panic if one of
@@ -29,6 +46,32 @@ func SliceStringsToInterfaces(s []string) []interface{} {
 	return d
 }
 
+// SliceInterfacesToManagedObjectReferences converts an interface slice into a
+// slice of ManagedObjectReferences with the type of t.
+func SliceInterfacesToManagedObjectReferences(s []interface{}, t string) []types.ManagedObjectReference {
+	var d []types.ManagedObjectReference
+	for _, v := range s {
+		d = append(d, types.ManagedObjectReference{
+			Type:  t,
+			Value: v.(string),
+		})
+	}
+	return d
+}
+
+// SliceStringsToManagedObjectReferences converts a string slice into a slice
+// of ManagedObjectReferences with the type of t.
+func SliceStringsToManagedObjectReferences(s []string, t string) []types.ManagedObjectReference {
+	var d []types.ManagedObjectReference
+	for _, v := range s {
+		d = append(d, types.ManagedObjectReference{
+			Type:  t,
+			Value: v,
+		})
+	}
+	return d
+}
+
 // MergeSchema merges the map[string]*schema.Schema from src into dst. Safety
 // against conflicts is enforced by panicing.
 func MergeSchema(dst, src map[string]*schema.Schema) {
@@ -38,6 +81,40 @@ func MergeSchema(dst, src map[string]*schema.Schema) {
 		}
 		dst[k] = v
 	}
+}
+
+// StringPtr makes a *string out of the value passed in through v.
+//
+// vSphere uses nil values in strings to omit values in the SOAP XML request,
+// and helps denote inheritance in certain cases.
+func StringPtr(v string) *string {
+	return &v
+}
+
+// GetStringPtr reads a ResourceData and returns an appropriate *string for the
+// state of the definition. nil is returned if it does not exist.
+func GetStringPtr(d *schema.ResourceData, key string) *string {
+	v, e := d.GetOkExists(key)
+	if e {
+		return StringPtr(v.(string))
+	}
+	return nil
+}
+
+// GetString reads a ResourceData and returns a *string. This differs from
+// GetStringPtr in that a nil value is never returned.
+func GetString(d *schema.ResourceData, key string) *string {
+	return StringPtr(d.Get(key).(string))
+}
+
+// SetStringPtr sets a ResourceData field depending on if a *string exists or
+// not.  The field is not set if it's nil.
+func SetStringPtr(d *schema.ResourceData, key string, val *string) error {
+	if val == nil {
+		return nil
+	}
+	err := d.Set(key, val)
+	return err
 }
 
 // BoolPtr makes a *bool out of the value passed in through v.
@@ -72,6 +149,84 @@ func SetBoolPtr(d *schema.ResourceData, key string, val *bool) error {
 	}
 	err := d.Set(key, val)
 	return err
+}
+
+// GetBoolStringPtr reads a ResourceData *string* field. This field is handled
+// in the following way:
+//
+// * If it's empty, nil is returned.
+// * The string is then sent through ParseBool. This will return a valid value
+// for anything ParseBool returns a value for.
+// * If it's anything else, an error is returned.
+//
+// This is designed to address the current lack of HCL and Terraform to be able
+// to distinguish between nil states and zero values properly. This is a
+// systemic issue that affects reading, writing, and diffing of these values.
+// These issues will eventually be addressed in HCL2.
+func GetBoolStringPtr(d *schema.ResourceData, key string) (*bool, error) {
+	v, ok := d.GetOk(key)
+	if !ok {
+		return nil, nil
+	}
+	b, err := strconv.ParseBool(v.(string))
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// SetBoolStringPtr sets a stringified ResoruceData bool field. This is a field
+// that is supposed to behave like a bool (true/false), but needs to be a
+// string to represent a nil state as well.
+//
+// This is designed to address the current lack of HCL and Terraform to be able
+// to distinguish between nil states and zero values properly. This is a
+// systemic issue that affects reading, writing, and diffing of these values.
+// These issues will eventually be addressed in HCL2.
+func SetBoolStringPtr(d *schema.ResourceData, key string, val *bool) error {
+	var s string
+	if val != nil {
+		s = strconv.FormatBool(*val)
+	}
+	return d.Set(key, s)
+}
+
+// BoolStringPtrState is a state normalization function for stringified 3-state
+// bool pointers.
+//
+// The function silently drops any result that can't be parsed with ParseBool,
+// and will return an empty string for these cases.
+//
+// This is designed to address the current lack of HCL and Terraform to be able
+// to distinguish between nil states and zero values properly. This is a
+// systemic issue that affects reading, writing, and diffing of these values.
+// These issues will eventually be addressed in HCL2.
+func BoolStringPtrState(v interface{}) string {
+	b, err := strconv.ParseBool(v.(string))
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatBool(b)
+}
+
+// ValidateBoolStringPtr validates that the input value can be parsed by
+// ParseBool. It also succeeds on empty strings.
+//
+// This is designed to address the current lack of HCL and Terraform to be able
+// to distinguish between nil states and zero values properly. This is a
+// systemic issue that affects reading, writing, and diffing of these values.
+// These issues will eventually be addressed in HCL2.
+func ValidateBoolStringPtr() schema.SchemaValidateFunc {
+	return func(i interface{}, k string) (s []string, es []error) {
+		v := i.(string)
+		if v == "" {
+			return
+		}
+		if _, err := strconv.ParseBool(v); err != nil {
+			es = append(es, err)
+		}
+		return
+	}
 }
 
 // Int64Ptr makes an *int64 out of the value passed in through v.
@@ -399,4 +554,50 @@ func LogCond(c bool, t, f interface{}) interface{} {
 		return t
 	}
 	return f
+}
+
+// SetBatch takes a map of values and sets the appropriate top-level attributes
+// for each item.
+//
+// attrs is a map[string]interface{} that follows a pattern in the example
+// below:
+//
+//   err := SetBatch(d, map[string]interface{}{
+//  	"foo": obj.Foo,
+//  	"bar": obj.Bar,
+//   })
+//   if err != nil {
+//  	return err
+//   }
+//
+// For best results, supplied values should be or have concrete values that map
+// to the correct values for the respective type in helper/schema. This is
+// enforced by way of checking each Set call for errors. If there is an error
+// setting a particular key, processing stops immediately.
+func SetBatch(d *schema.ResourceData, attrs map[string]interface{}) error {
+	for k, v := range attrs {
+		if err := d.Set(k, v); err != nil {
+			return fmt.Errorf("error setting attribute %q: %s", k, err)
+		}
+	}
+
+	return nil
+}
+
+// MoRefSorter is a sorting wrapper for a slice of MangedObjectReference.
+type MoRefSorter []types.ManagedObjectReference
+
+// Len implements sort.Interface for MoRefSorter.
+func (s MoRefSorter) Len() int {
+	return len(s)
+}
+
+// Less helps implement sort.Interface for MoRefSorter.
+func (s MoRefSorter) Less(i, j int) bool {
+	return s[i].Value < s[j].Value
+}
+
+// Swap helps implement sort.Interface for MoRefSorter.
+func (s MoRefSorter) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }

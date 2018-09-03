@@ -1,7 +1,8 @@
 package vsphere
 
 import (
-	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/hashicorp/terraform/helper/schema"
@@ -52,45 +53,80 @@ func Provider() terraform.ResourceProvider {
 				Type:        schema.TypeBool,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_CLIENT_DEBUG", false),
-				Description: "govomomi debug",
+				Description: "govmomi debug",
 			},
 			"client_debug_path_run": &schema.Schema{
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_CLIENT_DEBUG_PATH_RUN", ""),
-				Description: "govomomi debug path for a single run",
+				Description: "govmomi debug path for a single run",
 			},
 			"client_debug_path": &schema.Schema{
 				Type:        schema.TypeString,
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_CLIENT_DEBUG_PATH", ""),
-				Description: "govomomi debug path for debug",
+				Description: "govmomi debug path for debug",
+			},
+			"persist_session": &schema.Schema{
+				Type:        schema.TypeBool,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_PERSIST_SESSION", false),
+				Description: "Persist vSphere client sessions to disk",
+			},
+			"vim_session_path": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_VIM_SESSION_PATH", filepath.Join(os.Getenv("HOME"), ".govmomi", "sessions")),
+				Description: "The directory to save vSphere SOAP API sessions to",
+			},
+			"rest_session_path": &schema.Schema{
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("VSPHERE_REST_SESSION_PATH", filepath.Join(os.Getenv("HOME"), ".govmomi", "rest_sessions")),
+				Description: "The directory to save vSphere REST API sessions to",
 			},
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
-			"vsphere_custom_attribute":           resourceVSphereCustomAttribute(),
-			"vsphere_datacenter":                 resourceVSphereDatacenter(),
-			"vsphere_distributed_port_group":     resourceVSphereDistributedPortGroup(),
-			"vsphere_distributed_virtual_switch": resourceVSphereDistributedVirtualSwitch(),
-			"vsphere_file":                       resourceVSphereFile(),
-			"vsphere_folder":                     resourceVSphereFolder(),
-			"vsphere_host_port_group":            resourceVSphereHostPortGroup(),
-			"vsphere_host_virtual_switch":        resourceVSphereHostVirtualSwitch(),
-			"vsphere_license":                    resourceVSphereLicense(),
-			"vsphere_tag":                        resourceVSphereTag(),
-			"vsphere_tag_category":               resourceVSphereTagCategory(),
-			"vsphere_virtual_disk":               resourceVSphereVirtualDisk(),
-			"vsphere_virtual_machine":            resourceVSphereVirtualMachine(),
-			"vsphere_nas_datastore":              resourceVSphereNasDatastore(),
-			"vsphere_vmfs_datastore":             resourceVSphereVmfsDatastore(),
-			"vsphere_virtual_machine_snapshot":   resourceVSphereVirtualMachineSnapshot(),
+			"vsphere_compute_cluster":                         resourceVSphereComputeCluster(),
+			"vsphere_compute_cluster_host_group":              resourceVSphereComputeClusterHostGroup(),
+			"vsphere_compute_cluster_vm_affinity_rule":        resourceVSphereComputeClusterVMAffinityRule(),
+			"vsphere_compute_cluster_vm_anti_affinity_rule":   resourceVSphereComputeClusterVMAntiAffinityRule(),
+			"vsphere_compute_cluster_vm_dependency_rule":      resourceVSphereComputeClusterVMDependencyRule(),
+			"vsphere_compute_cluster_vm_group":                resourceVSphereComputeClusterVMGroup(),
+			"vsphere_compute_cluster_vm_host_rule":            resourceVSphereComputeClusterVMHostRule(),
+			"vsphere_custom_attribute":                        resourceVSphereCustomAttribute(),
+			"vsphere_datacenter":                              resourceVSphereDatacenter(),
+			"vsphere_datastore_cluster":                       resourceVSphereDatastoreCluster(),
+			"vsphere_datastore_cluster_vm_anti_affinity_rule": resourceVSphereDatastoreClusterVMAntiAffinityRule(),
+			"vsphere_distributed_port_group":                  resourceVSphereDistributedPortGroup(),
+			"vsphere_distributed_virtual_switch":              resourceVSphereDistributedVirtualSwitch(),
+			"vsphere_drs_vm_override":                         resourceVSphereDRSVMOverride(),
+			"vsphere_dpm_host_override":                       resourceVSphereDPMHostOverride(),
+			"vsphere_file":                                    resourceVSphereFile(),
+			"vsphere_folder":                                  resourceVSphereFolder(),
+			"vsphere_ha_vm_override":                          resourceVSphereHAVMOverride(),
+			"vsphere_host_port_group":                         resourceVSphereHostPortGroup(),
+			"vsphere_host_virtual_switch":                     resourceVSphereHostVirtualSwitch(),
+			"vsphere_license":                                 resourceVSphereLicense(),
+			"vsphere_resource_pool":                           resourceVSphereResourcePool(),
+			"vsphere_tag":                                     resourceVSphereTag(),
+			"vsphere_tag_category":                            resourceVSphereTagCategory(),
+			"vsphere_virtual_disk":                            resourceVSphereVirtualDisk(),
+			"vsphere_virtual_machine":                         resourceVSphereVirtualMachine(),
+			"vsphere_nas_datastore":                           resourceVSphereNasDatastore(),
+			"vsphere_storage_drs_vm_override":                 resourceVSphereStorageDrsVMOverride(),
+			"vsphere_vapp_container":                          resourceVSphereVAppContainer(),
+			"vsphere_vmfs_datastore":                          resourceVSphereVmfsDatastore(),
+			"vsphere_virtual_machine_snapshot":                resourceVSphereVirtualMachineSnapshot(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{
+			"vsphere_compute_cluster":            dataSourceVSphereComputeCluster(),
 			"vsphere_custom_attribute":           dataSourceVSphereCustomAttribute(),
 			"vsphere_datacenter":                 dataSourceVSphereDatacenter(),
 			"vsphere_datastore":                  dataSourceVSphereDatastore(),
+			"vsphere_datastore_cluster":          dataSourceVSphereDatastoreCluster(),
 			"vsphere_distributed_virtual_switch": dataSourceVSphereDistributedVirtualSwitch(),
 			"vsphere_host":                       dataSourceVSphereHost(),
 			"vsphere_network":                    dataSourceVSphereNetwork(),
@@ -107,29 +143,9 @@ func Provider() terraform.ResourceProvider {
 }
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
-	// Handle backcompat support for vcenter_server; once that is removed,
-	// vsphere_server can just become a Required field that is referenced inline
-	// in Config below.
-	server := d.Get("vsphere_server").(string)
-
-	if server == "" {
-		server = d.Get("vcenter_server").(string)
+	c, err := NewConfig(d)
+	if err != nil {
+		return nil, err
 	}
-
-	if server == "" {
-		return nil, fmt.Errorf(
-			"One of vsphere_server or [deprecated] vcenter_server must be provided.")
-	}
-
-	config := Config{
-		User:          d.Get("user").(string),
-		Password:      d.Get("password").(string),
-		InsecureFlag:  d.Get("allow_unverified_ssl").(bool),
-		VSphereServer: server,
-		Debug:         d.Get("client_debug").(bool),
-		DebugPathRun:  d.Get("client_debug_path_run").(string),
-		DebugPath:     d.Get("client_debug_path").(string),
-	}
-
-	return config.Client()
+	return c.Client()
 }

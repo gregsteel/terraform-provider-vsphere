@@ -27,19 +27,16 @@ func VirtualMachineCloneSchema() map[string]*schema.Schema {
 		"template_uuid": {
 			Type:        schema.TypeString,
 			Required:    true,
-			ForceNew:    true,
 			Description: "The UUID of the source virtual machine or template.",
 		},
 		"linked_clone": {
 			Type:        schema.TypeBool,
 			Optional:    true,
-			ForceNew:    true,
 			Description: "Whether or not to create a linked clone when cloning. When this option is used, the source VM must have a single snapshot associated with it.",
 		},
 		"timeout": {
 			Type:         schema.TypeInt,
 			Optional:     true,
-			ForceNew:     true,
 			Default:      30,
 			Description:  "The timeout, in minutes, to wait for the virtual machine clone to complete.",
 			ValidateFunc: validation.IntAtLeast(10),
@@ -47,7 +44,6 @@ func VirtualMachineCloneSchema() map[string]*schema.Schema {
 		"customize": {
 			Type:        schema.TypeList,
 			Optional:    true,
-			ForceNew:    true,
 			MaxItems:    1,
 			Description: "The customization spec for this clone. This allows the user to configure the virtual machine post-clone.",
 			Elem:        &schema.Resource{Schema: VirtualMachineCustomizeSchema()},
@@ -114,6 +110,13 @@ func ValidateVirtualMachineClone(d *schema.ResourceDiff, c *govmomi.Client) erro
 			return err
 		}
 	}
+	vconfig := vprops.Config.VAppConfig
+	if vconfig != nil {
+		// We need to set the vApp transport types here so that it is available
+		// later in CustomizeDiff where transport requirements are validated in
+		// ValidateVAppTransport
+		d.SetNew("vapp_transport", vconfig.GetVmConfigInfo().OvfEnvironmentTransport)
+	}
 
 	log.Printf("[DEBUG] ValidateVirtualMachineClone: Source VM/template %s is a suitable source for cloning", tUUID)
 	return nil
@@ -150,12 +153,17 @@ func validateCloneSnapshots(props *mo.VirtualMachine) error {
 func ExpandVirtualMachineCloneSpec(d *schema.ResourceData, c *govmomi.Client) (types.VirtualMachineCloneSpec, *object.VirtualMachine, error) {
 	var spec types.VirtualMachineCloneSpec
 	log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Preparing clone spec for VM")
-	ds, err := datastore.FromID(c, d.Get("datastore_id").(string))
-	if err != nil {
-		return spec, nil, fmt.Errorf("error locating datastore for VM: %s", err)
+
+	// Populate the datastore only if we have a datastore ID. The ID may not be
+	// specified in the event a datastore cluster is specified instead.
+	if dsID, ok := d.GetOk("datastore_id"); ok {
+		ds, err := datastore.FromID(c, dsID.(string))
+		if err != nil {
+			return spec, nil, fmt.Errorf("error locating datastore for VM: %s", err)
+		}
+		spec.Location.Datastore = types.NewReference(ds.Reference())
 	}
-	dsRef := ds.Reference()
-	spec.Location.Datastore = &dsRef
+
 	tUUID := d.Get("clone.0.template_uuid").(string)
 	log.Printf("[DEBUG] ExpandVirtualMachineCloneSpec: Cloning from UUID: %s", tUUID)
 	vm, err := virtualmachine.FromUUID(c, tUUID)

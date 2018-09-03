@@ -1,4 +1,172 @@
-## 1.3.2 (Unreleased)
+## 1.7.1 (Unreleased)
+## 1.7.0 (August 24, 2018)
+
+FEATURES:
+* **New Resource:** `vsphere_vapp_container` ([#566](https://github.com/terraform-providers/terraform-provider-vsphere/issues/566))
+* `resource/vsphere_virtual_machine`: Added support for bus sharing on SCSI
+  adapters. ([#574](https://github.com/terraform-providers/terraform-provider-vsphere/issues/574))
+
+IMPROVEMENTS:
+* `resource/vsphere_datacenter`: Added `moid` to expose the managed object ID
+  because the datacenter's name is currently being used as the `id`.
+  ([#575](https://github.com/terraform-providers/terraform-provider-vsphere/issues/575))
+* `resource/vsphere_virtual_machine`: Check if relocation is necessary after
+  creation. ([#583](https://github.com/terraform-providers/terraform-provider-vsphere/issues/583))
+
+BUG FIXES:
+
+* `resource/vsphere_virtual_machine`: The resource no longer attempts to set
+  ResourceAllocation on virtual ethernet cards when the vSphere version is under 6.0. ([#579](https://github.com/terraform-providers/terraform-provider-vsphere/issues/579))
+* `resource/vsphere_resource_pool`: The read function is now called at the end
+  of resource creation.
+  ([#560](https://github.com/terraform-providers/terraform-provider-vsphere/issues/560))
+* Updated govmomi to v0.18. ([#600](https://github.com/terraform-providers/terraform-provider-vsphere/issues/600))
+
+## 1.6.0 (May 31, 2018)
+
+FEATURES:
+
+* **New Resource:** `vsphere_resource_pool` ([#535](https://github.com/terraform-providers/terraform-provider-vsphere/issues/535))
+
+IMPROVEMENTS:
+
+* `data/vsphere_host`: Now exports the `resource_pool_id` attribute, which
+  points to the root resource pool of either the standalone host, or the
+  cluster's root resource pool in the event the host is a member of a cluster.
+  ([#535](https://github.com/terraform-providers/terraform-provider-vsphere/issues/535))
+
+BUG FIXES:
+
+* `resource/vsphere_virtual_machine`: Scenarios that force a new resource will
+  no longer create diff mismatches when external disks are attached with the
+  `attach` parameter. ([#528](https://github.com/terraform-providers/terraform-provider-vsphere/issues/528))
+
+## 1.5.0 (May 11, 2018)
+
+FEATURES:
+
+* **New Data Source:** `vsphere_compute_cluster` ([#492](https://github.com/terraform-providers/terraform-provider-vsphere/issues/492))
+* **New Resource:** `vsphere_compute_cluster` ([#487](https://github.com/terraform-providers/terraform-provider-vsphere/issues/487))
+* **New Resource:** `vsphere_drs_vm_override` ([#498](https://github.com/terraform-providers/terraform-provider-vsphere/issues/498))
+* **New Resource:** `vsphere_ha_vm_override` ([#501](https://github.com/terraform-providers/terraform-provider-vsphere/issues/501))
+* **New Resource:** `vsphere_dpm_host_override` ([#503](https://github.com/terraform-providers/terraform-provider-vsphere/issues/503))
+* **New Resource:** `vsphere_compute_cluster_vm_group` ([#506](https://github.com/terraform-providers/terraform-provider-vsphere/issues/506))
+* **New Resource:** `vsphere_compute_cluster_host_group` ([#508](https://github.com/terraform-providers/terraform-provider-vsphere/issues/508))
+* **New Resource:** `vsphere_compute_cluster_vm_host_rule` ([#511](https://github.com/terraform-providers/terraform-provider-vsphere/issues/511))
+* **New Resource:** `vsphere_compute_cluster_vm_dependency_rule` ([#513](https://github.com/terraform-providers/terraform-provider-vsphere/issues/513))
+* **New Resource:** `vsphere_compute_cluster_vm_affinity_rule` ([#515](https://github.com/terraform-providers/terraform-provider-vsphere/issues/515))
+* **New Resource:** `vsphere_compute_cluster_vm_anti_affinity_rule` ([#515](https://github.com/terraform-providers/terraform-provider-vsphere/issues/515))
+* **New Resource:** `vsphere_datastore_cluster_vm_anti_affinity_rule` ([#520](https://github.com/terraform-providers/terraform-provider-vsphere/issues/520))
+
+IMPROVEMENTS:
+
+* `resource/vsphere_virtual_machine`: Exposed `latency_sensitivity`, which can
+  be used to adjust the scheduling priority of the virtual machine for
+  low-latency applications. ([#490](https://github.com/terraform-providers/terraform-provider-vsphere/issues/490))
+* `resource/vsphere_virtual_disk`: Introduced the `create_directories` setting,
+  which tells this resource to create any parent directories in the VMDK path.
+  ([#512](https://github.com/terraform-providers/terraform-provider-vsphere/issues/512))
+
+## 1.4.1 (April 23, 2018)
+
+IMPROVEMENTS:
+
+* `resource/vsphere_virtual_machine`: Introduced the
+  `wait_for_guest_net_routable` setting, which controls whether or not the guest
+  network waiter waits on an address that matches the virtual machine's
+  configured default gateway. ([#470](https://github.com/terraform-providers/terraform-provider-vsphere/issues/470))
+
+BUG FIXES:
+
+* `resource/vsphere_virtual_machine`: The resource now correctly blocks `clone`
+  workflows on direct ESXi connections, where cloning is not supported. ([#476](https://github.com/terraform-providers/terraform-provider-vsphere/issues/476))
+* `resource/vsphere_virtual_machine`: Corrected an issue that was preventing VMs
+  from being migrated from one cluster to another. ([#474](https://github.com/terraform-providers/terraform-provider-vsphere/issues/474))
+* `resource/vsphere_virtual_machine`: Corrected an issue where changing
+  datastore information and cloning/customization parameters (which forces a new
+  resource) at the same time was creating a diff mismatch after destroying the
+  old virtual machine. ([#469](https://github.com/terraform-providers/terraform-provider-vsphere/issues/469))
+* `resource/vsphere_virtual_machine`: Corrected a crash that can come up from an
+  incomplete lookup of network information during network device management.
+  ([#456](https://github.com/terraform-providers/terraform-provider-vsphere/issues/456))
+* `resource/vsphere_virtual_machine`: Corrected some issues where some
+  post-clone configuration errors were leaving the resource half-completed and
+  irrecoverable without direct modification of the state. ([#467](https://github.com/terraform-providers/terraform-provider-vsphere/issues/467))
+* `resource/vsphere_virtual_machine`: Corrected a crash that can come up when a
+  retrieved virtual machine has no lower-level configuration object in the API.
+  ([#463](https://github.com/terraform-providers/terraform-provider-vsphere/issues/463))
+* `resource/vsphere_virtual_machine`: Fixed an issue where disk sub-resource
+  configurations were not being checked for newly created disks.
+  ([#481](https://github.com/terraform-providers/terraform-provider-vsphere/issues/481))
+
+## 1.4.0 (April 10, 2018)
+
+FEATURES:
+
+* **New Resource:** `vsphere_storage_drs_vm_override` ([#450](https://github.com/terraform-providers/terraform-provider-vsphere/issues/450))
+* **New Resource:** `vsphere_datastore_cluster` ([#436](https://github.com/terraform-providers/terraform-provider-vsphere/issues/436))
+* **New Data Source:** `vsphere_datastore_cluster` ([#437](https://github.com/terraform-providers/terraform-provider-vsphere/issues/437))
+
+IMPROVEMENTS:
+
+* The provider now has the ability to persist sessions to disk, which can help
+  when running large amounts of consecutive or concurrent Terraform operations
+  at once. See the [provider
+  documentation](https://www.terraform.io/docs/providers/vsphere/index.html) for
+  more details. ([#422](https://github.com/terraform-providers/terraform-provider-vsphere/issues/422))
+* `resource/vsphere_virtual_machine`: This resource now supports import of
+  resources or migrations from legacy versions of the provider (provider version
+  0.4.2 or earlier) into configurations that have the `clone` block specified.
+  See [Additional requirements and notes for
+  importing](https://www.terraform.io/docs/providers/vsphere/r/virtual_machine.html#additional-requirements-and-notes-for-importing)
+  in the resource documentation for more details. ([#460](https://github.com/terraform-providers/terraform-provider-vsphere/issues/460))
+* `resource/vsphere_virtual_machine`: Now supports datastore clusters. Virtual
+  machines placed in a datastore cluster will use Storage DRS recommendations
+  for initial placement, virtual disk creation, and migration between datastore
+  clusters. Migrations made by Storage DRS outside of Terraform will no longer
+  create diffs when datastore clusters are in use. ([#447](https://github.com/terraform-providers/terraform-provider-vsphere/issues/447))
+* `resource/vsphere_virtual_machine`: Added support for ISO transport of vApp
+  properties. The resource should now behave better with virtual machines cloned
+  from OVF/OVA templates that use the ISO transport to supply configuration
+  settings. ([#381](https://github.com/terraform-providers/terraform-provider-vsphere/issues/381))
+* `resource/vsphere_virtual_machine`: Added support for client mapped CDROM
+  devices. ([#421](https://github.com/terraform-providers/terraform-provider-vsphere/issues/421))
+* `resource/vsphere_virtual_machine`: Destroying a VM that currently has
+  external disks attached should now function correctly and not give a duplicate
+  UUID error. ([#442](https://github.com/terraform-providers/terraform-provider-vsphere/issues/442))
+* `resource/vsphere_nas_datastore`: Now supports datastore clusters. ([#439](https://github.com/terraform-providers/terraform-provider-vsphere/issues/439))
+* `resource/vsphere_vmfs_datastore`: Now supports datastore clusters. ([#439](https://github.com/terraform-providers/terraform-provider-vsphere/issues/439))
+
+## 1.3.3 (March 01, 2018)
+
+IMPROVEMENTS:
+
+* `resource/vsphere_virtual_machine`: The `moid` attribute has now be re-added
+  to the resource, exporting the managed object ID of the virtual machine.
+  ([#390](https://github.com/terraform-providers/terraform-provider-vsphere/issues/390))
+
+BUG FIXES:
+
+* `resource/vsphere_virtual_machine`: Fixed a crash scenario that can happen
+  when a virtual machine is deployed to a cluster that does not have any hosts,
+  or under certain circumstances such an expired vCenter license. ([#414](https://github.com/terraform-providers/terraform-provider-vsphere/issues/414))
+* `resource/vsphere_virtual_machine`: Corrected an issue reading disk capacity
+  values after a vCenter or ESXi upgrade. ([#405](https://github.com/terraform-providers/terraform-provider-vsphere/issues/405))
+* `resource/vsphere_virtual_machine`: Opaque networks, such as those coming from
+  NSX, should now be able to be correctly added as networks for virtual
+  machines. ([#398](https://github.com/terraform-providers/terraform-provider-vsphere/issues/398))
+
+## 1.3.2 (February 07, 2018)
+
+BUG FIXES:
+
+* `resource/vsphere_virtual_machine`: Changed the update implemented in ([#377](https://github.com/terraform-providers/terraform-provider-vsphere/issues/377))
+  to use a local filter implementation. This corrects situations where virtual
+  machines in inventory with orphaned or otherwise corrupt configurations were
+  interfering with UUID searches, creating erroneous duplicate UUID errors. This
+  fix applies to vSphere 6.0 and lower only. vSphere 6.5 was not affected.
+  ([#391](https://github.com/terraform-providers/terraform-provider-vsphere/issues/391))
+
 ## 1.3.1 (February 01, 2018)
 
 BUG FIXES:

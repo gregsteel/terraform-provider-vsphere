@@ -2,6 +2,7 @@ package vsphere
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -13,11 +14,14 @@ import (
 
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/clustercomputeresource"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/datastore"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/dvportgroup"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/folder"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/hostsystem"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/resourcepool"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/storagepod"
+	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/vappcontainer"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/viapi"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/virtualdisk"
 	"github.com/terraform-providers/terraform-provider-vsphere/vsphere/internal/helper/virtualmachine"
@@ -199,9 +203,9 @@ func testGetVirtualMachineResourcePool(s *terraform.State, resourceName string) 
 	return resourcepool.FromID(tVars.client, vprops.ResourcePool.Value)
 }
 
-// testGetVirtualMachineSCSIBusState reads the SCSI bus state for the supplied
+// testGetVirtualMachineSCSIBusType reads the SCSI bus type for the supplied
 // virtual machine.
-func testGetVirtualMachineSCSIBusState(s *terraform.State, resourceName string) (string, error) {
+func testGetVirtualMachineSCSIBusType(s *terraform.State, resourceName string) (string, error) {
 	tVars, err := testClientVariablesForResource(s, fmt.Sprintf("vsphere_virtual_machine.%s", resourceName))
 	if err != nil {
 		return "", err
@@ -215,7 +219,26 @@ func testGetVirtualMachineSCSIBusState(s *terraform.State, resourceName string) 
 		return "", err
 	}
 	l := object.VirtualDeviceList(vprops.Config.Hardware.Device)
-	return virtualdevice.ReadSCSIBusState(l, count), nil
+	return virtualdevice.ReadSCSIBusType(l, count), nil
+}
+
+// testGetVirtualMachineSCSIBusSharing reads the SCSI bus sharing mode for the
+// supplied virtual machine.
+func testGetVirtualMachineSCSIBusSharing(s *terraform.State, resourceName string) (string, error) {
+	tVars, err := testClientVariablesForResource(s, fmt.Sprintf("vsphere_virtual_machine.%s", resourceName))
+	if err != nil {
+		return "", err
+	}
+	vprops, err := testGetVirtualMachineProperties(s, resourceName)
+	if err != nil {
+		return "", err
+	}
+	count, err := strconv.Atoi(tVars.resourceAttributes["scsi_controller_count"])
+	if err != nil {
+		return "", err
+	}
+	l := object.VirtualDeviceList(vprops.Config.Hardware.Device)
+	return virtualdevice.ReadSCSIBusSharing(l, count), nil
 }
 
 func testGetDatacenter(s *terraform.State, resourceName string) (*object.Datacenter, error) {
@@ -230,12 +253,44 @@ func testGetDatacenter(s *terraform.State, resourceName string) (*object.Datacen
 	return getDatacenter(tVars.client, dcName)
 }
 
+func testGetResourcePool(s *terraform.State, resourceName string) (*object.ResourcePool, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereResourcePoolName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return resourcepool.FromID(vars.client, vars.resourceID)
+}
+
+func testGetResourcePoolProperties(s *terraform.State, resourceName string) (*mo.ResourcePool, error) {
+	rp, err := testGetResourcePool(s, resourceName)
+	if err != nil {
+		return nil, err
+	}
+	return resourcepool.Properties(rp)
+}
+
 func testGetDatacenterCustomAttributes(s *terraform.State, resourceName string) (*mo.Datacenter, error) {
 	dc, err := testGetDatacenter(s, resourceName)
 	if err != nil {
 		return nil, err
 	}
 	return datacenterCustomAttributes(dc)
+}
+
+func testGetVAppContainer(s *terraform.State, resourceName string) (*object.VirtualApp, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereVAppContainerName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return vappcontainer.FromID(vars.client, vars.resourceID)
+}
+
+func testGetVAppContainerProperties(s *terraform.State, resourceName string) (*mo.VirtualApp, error) {
+	vc, err := testGetVAppContainer(s, resourceName)
+	if err != nil {
+		return nil, err
+	}
+	return vappcontainer.Properties(vc)
 }
 
 // testPowerOffVM does an immediate power-off of the supplied virtual machine
@@ -662,4 +717,388 @@ func testResourceHasCustomAttributeValues(s *terraform.State, resourceType strin
 		return fmt.Errorf("expected custom attributes to be %q, got %q", expectedAttrs, actualAttrs)
 	}
 	return nil
+}
+
+// testDeleteDatastoreFile deletes the specified file from a datastore. If the
+// file does not exist, an error is returned.
+func testDeleteDatastoreFile(client *govmomi.Client, dsID string, path string) error {
+	ds, err := datastore.FromID(client, dsID)
+	if err != nil {
+		return err
+	}
+	dc, err := getDatacenter(client, ds.DatacenterPath)
+	if err != nil {
+		return err
+	}
+	fm := object.NewFileManager(client.Client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+	task, err := fm.DeleteDatastoreFile(ctx, path, dc)
+	if err != nil {
+		return err
+	}
+	return task.Wait(context.TODO())
+}
+
+// testGetDatastoreCluster is a convenience method to fetch a datastore cluster by
+// resource name.
+func testGetDatastoreCluster(s *terraform.State, resourceName string) (*object.StoragePod, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereDatastoreClusterName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return storagepod.FromID(vars.client, vars.resourceID)
+}
+
+// testGetDatastoreClusterProperties is a convenience method that adds an extra
+// step to testGetDatastoreCluster to get the properties of a StoragePod.
+func testGetDatastoreClusterProperties(s *terraform.State, resourceName string) (*mo.StoragePod, error) {
+	pod, err := testGetDatastoreCluster(s, resourceName)
+	if err != nil {
+		return nil, err
+	}
+	return storagepod.Properties(pod)
+}
+
+// testGetDatastoreClusterSDRSVMConfig is a convenience method to fetch a VM's
+// SDRS override in a datastore cluster.
+func testGetDatastoreClusterSDRSVMConfig(s *terraform.State, resourceName string) (*types.StorageDrsVmConfigInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereStorageDrsVMOverrideName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	podID, vmID, err := resourceVSphereStorageDrsVMOverrideParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	pod, err := storagepod.FromID(vars.client, podID)
+	if err != nil {
+		return nil, err
+	}
+
+	vm, err := virtualmachine.FromUUID(vars.client, vmID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereStorageDrsVMOverrideFindEntry(pod, vm)
+}
+
+// testGetComputeCluster is a convenience method to fetch a compute cluster by
+// resource name.
+func testGetComputeCluster(s *terraform.State, resourceName string) (*object.ClusterComputeResource, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return clustercomputeresource.FromID(vars.client, vars.resourceID)
+}
+
+// testGetComputeClusterFromDataSource is a convenience method to fetch a
+// compute cluster via the data in a vsphere_compute_cluster data source.
+func testGetComputeClusterFromDataSource(s *terraform.State, resourceName string) (*object.ClusterComputeResource, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("data.%s.%s", resourceVSphereComputeClusterName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return clustercomputeresource.FromID(vars.client, vars.resourceID)
+}
+
+// testGetComputeClusterProperties is a convenience method that adds an extra
+// step to testGetComputeCluster to get the properties of a
+// ClusterComputeResource.
+func testGetComputeClusterProperties(s *terraform.State, resourceName string) (*mo.ClusterComputeResource, error) {
+	cluster, err := testGetComputeCluster(s, resourceName)
+	if err != nil {
+		return nil, err
+	}
+	return clustercomputeresource.Properties(cluster)
+}
+
+// testGetComputeClusterDRSVMConfig is a convenience method to fetch a VM's DRS
+// override in a (compute) cluster.
+func testGetComputeClusterDRSVMConfig(s *terraform.State, resourceName string) (*types.ClusterDrsVmConfigInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereDRSVMOverrideName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, vmID, err := resourceVSphereDRSVMOverrideParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	vm, err := virtualmachine.FromUUID(vars.client, vmID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereDRSVMOverrideFindEntry(cluster, vm)
+}
+
+// testGetComputeClusterHaVMConfig is a convenience method to fetch a VM's HA
+// override in a (compute) cluster.
+func testGetComputeClusterHaVMConfig(s *terraform.State, resourceName string) (*types.ClusterDasVmConfigInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereHAVMOverrideName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, vmID, err := resourceVSphereHAVMOverrideParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	vm, err := virtualmachine.FromUUID(vars.client, vmID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereHAVMOverrideFindEntry(cluster, vm)
+}
+
+// testGetComputeClusterDPMHostConfig is a convenience method to fetch a host's
+// DPM override in a (compute) cluster.
+func testGetComputeClusterDPMHostConfig(s *terraform.State, resourceName string) (*types.ClusterDpmHostConfigInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereDPMHostOverrideName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, hostID, err := resourceVSphereDPMHostOverrideParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	host, err := hostsystem.FromID(vars.client, hostID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereDPMHostOverrideFindEntry(cluster, host)
+}
+
+// testGetHostFromDataSource is a convenience method to fetch a host via the
+// data in a vsphere_host data source.
+func testGetHostFromDataSource(s *terraform.State, resourceName string) (*object.HostSystem, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("data.vsphere_host.%s", resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return hostsystem.FromID(vars.client, vars.resourceID)
+}
+
+// testGetComputeClusterVMGroup is a convenience method to fetch a virtual
+// machine group in a (compute) cluster.
+func testGetComputeClusterVMGroup(s *terraform.State, resourceName string) (*types.ClusterVmGroup, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterVMGroupName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterVMGroupParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterVMGroupFindEntry(cluster, name)
+}
+
+// testGetComputeClusterHostGroup is a convenience method to fetch a host group
+// in a (compute) cluster.
+func testGetComputeClusterHostGroup(s *terraform.State, resourceName string) (*types.ClusterHostGroup, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterHostGroupName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterHostGroupParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterHostGroupFindEntry(cluster, name)
+}
+
+// testGetComputeClusterVMHostRule is a convenience method to fetch a VM/host
+// rule from a (compute) cluster.
+func testGetComputeClusterVMHostRule(s *terraform.State, resourceName string) (*types.ClusterVmHostRuleInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterVMHostRuleName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterVMHostRuleParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterVMHostRuleFindEntry(cluster, name)
+}
+
+// testGetComputeClusterVMDependencyRule is a convenience method to fetch a VM
+// dependency rule from a (compute) cluster.
+func testGetComputeClusterVMDependencyRule(s *terraform.State, resourceName string) (*types.ClusterDependencyRuleInfo, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterVMDependencyRuleName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterVMDependencyRuleParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterVMDependencyRuleFindEntry(cluster, name)
+}
+
+// testGetComputeClusterVMAffinityRule is a convenience method to fetch a VM
+// affinity rule from a (compute) cluster.
+func testGetComputeClusterVMAffinityRule(s *terraform.State, resourceName string) (*types.ClusterAffinityRuleSpec, error) {
+	vars, err := testClientVariablesForResource(s, fmt.Sprintf("%s.%s", resourceVSphereComputeClusterVMAffinityRuleName, resourceName))
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterVMAffinityRuleParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterVMAffinityRuleFindEntry(cluster, name)
+}
+
+// testGetComputeClusterVMAntiAffinityRule is a convenience method to fetch a
+// VM anti-affinity rule from a (compute) cluster.
+func testGetComputeClusterVMAntiAffinityRule(s *terraform.State, resourceName string) (*types.ClusterAntiAffinityRuleSpec, error) {
+	vars, err := testClientVariablesForResource(
+		s,
+		fmt.Sprintf("%s.%s", resourceVSphereComputeClusterVMAntiAffinityRuleName, resourceName),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	clusterID, name, err := resourceVSphereComputeClusterVMAntiAffinityRuleParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster, err := clustercomputeresource.FromID(vars.client, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereComputeClusterVMAntiAffinityRuleFindEntry(cluster, name)
+}
+
+// testGetDatastoreClusterVMAntiAffinityRule is a convenience method to fetch a
+// VM anti-affinity rule from a datastore cluster.
+func testGetDatastoreClusterVMAntiAffinityRule(s *terraform.State, resourceName string) (*types.ClusterAntiAffinityRuleSpec, error) {
+	vars, err := testClientVariablesForResource(
+		s,
+		fmt.Sprintf("%s.%s", resourceVSphereDatastoreClusterVMAntiAffinityRuleName, resourceName),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if vars.resourceID == "" {
+		return nil, errors.New("resource ID is empty")
+	}
+
+	podID, key, err := resourceVSphereDatastoreClusterVMAntiAffinityRuleParseID(vars.resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	pod, err := storagepod.FromID(vars.client, podID)
+	if err != nil {
+		return nil, err
+	}
+
+	return resourceVSphereDatastoreClusterVMAntiAffinityRuleFindEntry(pod, key)
 }
