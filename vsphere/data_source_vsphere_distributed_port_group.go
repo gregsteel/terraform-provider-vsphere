@@ -46,11 +46,19 @@ func dataSourceVSphereDistributedPortGroupRead(d *schema.ResourceData, meta inte
 			return fmt.Errorf("cannot locate datacenter: %s", err)
 		}
 	}
-	rp, err := dvportgroup.FromPartialName(client, name, dc)
-	if err != nil {
-		return fmt.Errorf("error fetching distributed port group: %s", err)
+	//Try for exact name
+	dpg, err := dvportgroup.FromPath(client, name, dc)
+	if err == nil {
+		d.SetId(dpg.Reference().Value)
+	} else {
+		//Try partial match
+		dpg, err := dvportgroup.FromPartialName(client, name, dc)
+		if err == nil {
+			d.SetId(dpg.Reference().Value)
+		} else {
+			return fmt.Errorf("error fetching distributed port group: %s", err)
+		}
 	}
 
-	d.SetId(rp.Reference().Value)
 	return nil
 }
